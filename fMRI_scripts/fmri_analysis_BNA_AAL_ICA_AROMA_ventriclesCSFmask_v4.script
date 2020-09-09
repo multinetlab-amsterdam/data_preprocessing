@@ -1,0 +1,664 @@
+#!/bin/bash
+# $Id: FSL SINGLE SUBJECT MELODIC SCRIPT 2016/07/08 C.Vriend
+# using FSL5.0.8. and fsl_sub patch+v03.
+
+##############################################################################
+#                                                                            #
+# Description  : FSL MELODIC                                                 #
+#                                                                            #
+# Usage        :  <jobname> <RS image> <tarred SIENAX w/ FIRST folder>       #
+#                                                                            #
+#                                                                            #
+# Output       : All files generate in the output are compressed             #
+#                and copied to the output directory                          #
+#                                                                            #
+# Copyright 2012,2013 VU University medical Center                           #
+# Author: Ronald A van Schijndel & Keith S Cover & Chris Vriend              #
+#                                                                            #
+# -------------------------------------------------------------------------- #
+# Log:                                                                       #
+# 10-10-2017                                                                 #
+# Vriend, C. Modified script such that it uses BNA atlas and performs        #
+# WM CSF regression corrections  					     #   
+# 									     #
+# 1-12-2017								     #
+# Douw, L. Modified scripts for use, including replacement wm/csf regression #
+# with FSL based method							     #
+#   								             #
+# 									     #
+# 1-5-2018								     #	
+# Numan, T. Modified motion correction, using ICA-AROMA and FSL-GLM WM and   #
+# CSF regression. AAL atlas was added (BNA 210 + 14 FIRST rois, AAL 78 + 14  #
+# FIRST rois)                     					     #
+#                                                                            #
+##############################################################################
+
+
+##############################################################################
+# Assign the input parameters to logical names                               #
+# (normaly supplied by the jobs file)                                        #
+##############################################################################
+
+JobName=$1 # jobname
+FileName1=$2 # RS image (nii.gz)
+FileName2=$3 # sienax tar.bz2
+#FileName3=$4
+
+echo JobName:   "${JobName}"
+echo FileName1:  "${FileName1}"
+echo FileName2:  "${FileName2}"
+#echo FileName3:  "${FileName3}"
+
+
+# INPUT VARIABLES ############################################################
+
+## HOW MANY VOLUMES TO DELETE FROM START 
+del_vols=4
+
+### HIGH-PASS FILTER ##
+HPF=100
+
+# Smoothing kernel (FWHM mm)
+SKERN=5
+
+
+
+##############################################################################
+# Standard stuff to start script                                             #
+##############################################################################
+
+set -xv
+umask 077
+export HOME=${PWD}
+mkdir Output
+touch Output/"${JobName}".4script-begn
+echo  ${WRAPPER_COMMON_DIR} 
+ls -ltra ${WRAPPER_COMMON_DIR}
+ls -ltra
+set
+
+
+##############################################################################
+# Check the number of parameters                                             #
+##############################################################################
+
+SCRIPT_NAME="${0##*/}"
+USAGE="Usage: $SCRIPT_NAME <JobName> <FileName>" 
+if [ $# -ne 3 ] ; then
+   echo "" >&2
+   echo "WARNING: 3 parameters expected. " $# " found." >&2
+   echo "" >&2
+   echo "$USAGE" >&2
+fi
+
+
+###############################################################################
+# Install the executables (source FSL 5.0.10)                                 #
+###############################################################################
+
+if [ -z ${FSLDIR+x} ]; then 
+
+echo "FSLDIR is being sourced"; 
+
+export FSLDIR=/home/common/applications/FSL/FSL-5.0.10/
+. $FSLDIR/etc/fslconf/fsl.sh
+export PATH=$PATH:$FSLDIR/bin
+export FSLOUTPUTTYPE=NIFTI_GZ
+ls -ltra ${WRAPPER_COMMON_DIR}
+df .
+
+
+#echo "unpacking python scrips"; 
+	# unpack python scripts
+#cd ${WRAPPER_COMMON_DIR}
+#tar -jxf ${WRAPPER_COMMON_DIR}/RS_python.tar.bz2
+#tar -jxf ${WRAPPER_COMMON_DIR}/anaconda2.tar.bz2
+
+else 
+
+echo "FSLDIR is already sourced: $FSLDIR"
+sleep $[ $RANDOM % 10 ]
+
+fi
+
+
+#####################################################
+# Set number of concurrent process for fsl_sub 
+
+# if you know what you're doing you can play around with these settings
+# (and the settings in  *.express) to maximalize the use of the nodes
+
+verbose=1
+#######################################################
+   
+# unset environmental variable SGE_ROOT
+# otherwise bedpost wants to use SGE but isn't used on NCA GRID
+unset SGE_ROOT
+echo set beg
+set
+echo set end
+
+#######################################################################
+# set up Python scripts for ICA AROMA
+#######################################################################
+cd ${WRAPPER_COMMON_DIR}
+
+if [ ! -d python ]; then
+echo "unpacking RS_python.tar.bz2"
+tar -jxf RS_python.tar.bz2
+fi
+
+
+
+if [ ! -d anaconda2 ]; then
+echo "unpacking anaconda2.tar.bz2"
+tar -jxf anaconda2.tar.bz2
+fi
+
+# python 2.7.8
+PYTHONPATH=${WRAPPER_COMMON_DIR}/anaconda2/bin:${PYTHONPATH}
+PYTHONPATH=${WRAPPER_COMMON_DIR}/anaconda2/lib/python2.7/site-packages:${PYTHONPATH}
+PYTHONPATH=${WRAPPER_COMMON_DIR}/anaconda2/pkgs:${PYTHONPATH}
+PYTHONPATH=${WRAPPER_COMMON_DIR}/python/local/lib/python2.7/site-packages:${PYTHONPATH}
+PYTHONPATH=${WRAPPER_COMMON_DIR}/python/local/bin:${PYTHONPATH}
+PYTHONPATH=/home/common/applications/Python/Python-2.7.8/Lib:${PYTHONPATH}
+
+
+PATH=${WRAPPER_COMMON_DIR}/anaconda2/bin:${PATH}
+PATH=${WRAPPER_COMMON_DIR}/python/local/bin:${PATH}
+
+export PYTHONPATH=$PYTHONPATH
+export PATH=$PATH
+
+# SET UP ICA AROMA
+ICA_AROMA=${WRAPPER_COMMON_DIR}/python/ICA_AROMA.py
+export ICA_AROMA=$ICA_AROMA
+
+
+
+##############################################################################
+# Process the data, compress the output and move it to the Output directory  # 
+##############################################################################
+
+cd ${HOME}
+
+mkdir ${JobName}_rs
+mkdir ${JobName}_T1
+# Resting state image
+mv ${FileName1} ${JobName}_rs
+# Sienax tar file
+mv ${FileName2} ${JobName}_T1
+
+
+# w/o cerebellum
+#BNAfile=${WRAPPER_COMMON_DIR}/BNA_cortical_atlas_MNI_1mm.nii.gz
+
+# w/ cerebellum
+BNAfile=${WRAPPER_COMMON_DIR}/BNA_cortical_cerebellum_atlas_MNI_1mm.nii.gz
+
+# AAL atlas
+AALfile=${WRAPPER_COMMON_DIR}/aal_MNI_V4_1mm_gong_brain.nii.gz
+
+##################
+## UNPACK SIENAX #
+##################
+
+cd ${HOME}/${JobName}_T1
+echo "unpacking SIENAX folder"
+tar -xf ${FileName2} 
+
+# rename sienax folder to ensure subsequent commands to run smoothly
+mv ${FileName2} ..
+dirs=`ls -d */`
+mv ${dirs} ${JobName}_sienax
+
+
+cd ${HOME}/${JobName}_rs
+
+# cut first volume from resting state fMRI scan
+#mv ${FileName3} fmri_first_volume.nii.gz 
+fslroi ${FileName1} fmri_first_volume 0 1
+
+
+# BET first volume
+bet2 fmri_first_volume.nii.gz fmri_first_volume_brain_f0.2.nii.gz -f 0.2 
+
+
+#### EXTRACT SCAN PARAMETERS ############
+# from script Richard
+all_vol=`fslinfo ${FileName1}  | grep dim4 | head -n 1 | awk '{print $2}'`
+TR=`fslinfo ${FileName1}  | grep pixdim4 | head -n 1 | awk '{print $2}'`
+echo "${all_vol}"
+#all_vol=${all_vol}
+middle_vol=`echo ${all_vol} / 2 -1 | bc`
+rest_vol=`echo ${all_vol} - ${del_vols} | bc`
+
+
+mkdir ${HOME}/${JobName}_rs/fmri.ica
+mkdir ${HOME}/${JobName}_rs/fmri.ica/logs
+
+cd ${HOME}/${JobName}_rs
+
+# INITIALISATION
+echo "initialisation"
+fslmaths ${FileName1} prefiltered_func_data -odt float
+
+fslroi prefiltered_func_data prefiltered_func_data ${del_vols} ${rest_vol}
+
+# Create "example_func" based on the middle slice, one 3D image
+echo "create example_func"
+fslroi prefiltered_func_data example_func ${middle_vol} 1
+
+
+#################
+# Registration  #
+#################
+
+echo "running registration"
+
+mkdir -p ${HOME}/${JobName}_rs/fmri.ica/reg
+cd ${HOME}/${JobName}_rs/fmri.ica/reg/
+
+
+## inserts from script Anand/Kim
+
+# copy and rename different scans
+
+fslmaths ${HOME}/${JobName}_rs/fmri_first_volume_brain_f0.2 initial_highres
+
+fslmaths ${FSLDIR}/data/standard/MNI152_T1_2mm_brain standard
+
+fslmaths ${FSLDIR}/data/standard/MNI152_T1_2mm standard_head
+
+fslmaths ${FSLDIR}/data/standard/MNI152_T1_2mm_brain_mask_dil standard_mask
+
+
+##########################################
+## register functional image 2 ref image #
+##########################################
+
+echo "register functional image to initial high contrast ref image"
+flirt -in ${HOME}/${JobName}_rs/example_func -ref initial_highres -out example_func2initial_highres -omat example_func2initial_highres.mat -cost corratio -dof 6 -schedule ${FSLDIR}/etc/flirtsch/sch3Dtrans_3dof -searchrx -90 90 -searchry -90 90 -searchrz -90 90 -interp trilinear 
+
+#flirt -in ${HOME}/${JobName}_rs/example_func -ref initial_highres -out example_func2initial_highres -omat example_func2initial_highres.mat -cost corratio -interp nearestneighbour 
+
+################################################
+# register functional image 2 structural image #
+################################################
+
+#echo "EPI_REG = FAST, FLIRT pre-alignment, BBR"
+#epi_reg --epi=initial_highres --t1=${HOME}/${JobName}_T1/${JobName}_sienax/I --t1brain=${HOME}/${JobName}_T1/${JobName}_sienax/I_brain --out=initial_highres2highres # = FAST, FLIRT PRE-ALIGNMENT & BBR
+
+flirt -ref ${HOME}/${JobName}_T1/${JobName}_sienax/I_brain -in initial_highres -out initial_highres2highres -omat initial_highres2highres.mat -bins 256 -cost corratio -searchrx 0 0 -searchry 0 0 -searchrz 0 0 -dof 6
+
+convert_xfm -inverse -omat highres2initial_highres.mat initial_highres2highres.mat
+
+# Use slicer to print pictures
+slicer initial_highres2highres ${HOME}/${JobName}_T1/${JobName}_sienax/I_brain -s 2 -x 0.35 sla.png -x 0.45 slb.png -x 0.55 slc.png -x 0.65 sld.png -y 0.35 sle.png -y 0.45 slf.png -y 0.55 slg.png -y 0.65 slh.png -z 0.35 sli.png -z 0.45 slj.png -z 0.55 slk.png -z 0.65 sll.png ; pngappend sla.png + slb.png + slc.png + sld.png + sle.png + slf.png + slg.png + slh.png + sli.png + slj.png + slk.png + sll.png initial_highres2highres1.png ; slicer ${HOME}/${JobName}_T1/${JobName}_sienax/I_brain initial_highres2highres -s 2 -x 0.35 sla.png -x 0.45 slb.png -x 0.55 slc.png -x 0.65 sld.png -y 0.35 sle.png -y 0.45 slf.png -y 0.55 slg.png -y 0.65 slh.png -z 0.35 sli.png -z 0.45 slj.png -z 0.55 slk.png -z 0.65 sll.png ; pngappend sla.png + slb.png + slc.png + sld.png + sle.png + slf.png + slg.png + slh.png + sli.png + slj.png + slk.png + sll.png initial_highres2highres2.png ; pngappend initial_highres2highres1.png - initial_highres2highres2.png initial_highres2highres.png
+rm -f sl?.png initial_highres2highres2.png initial_highres2highres1.png
+
+#pngappend example_func2initial_highres1.png - example_func2initial_highres2.png example_func2initial_highres.png; 
+
+#/bin/rm -f sl?.png example_func2initial_highres2.png
+#/bin/rm example_func2initial_highres1.png
+
+
+convert_xfm -omat example_func2highres.mat -concat initial_highres2highres.mat example_func2initial_highres.mat
+
+flirt -ref ${HOME}/${JobName}_T1/${JobName}_sienax/I_brain -in ${HOME}/${JobName}_rs/example_func -out example_func2highres -applyxfm -init example_func2highres.mat -interp nearestneighbour
+
+convert_xfm -inverse -omat highres2example_func.mat example_func2highres.mat
+
+slicer example_func2highres ${HOME}/${JobName}_T1/${JobName}_sienax/I_brain -s 2 -x 0.35 sla.png -x 0.45 slb.png -x 0.55 slc.png -x 0.65 sld.png -y 0.35 sle.png -y 0.45 slf.png -y 0.55 slg.png -y 0.65 slh.png -z 0.35 sli.png -z 0.45 slj.png -z 0.55 slk.png -z 0.65 sll.png ; pngappend sla.png + slb.png + slc.png + sld.png + sle.png + slf.png + slg.png + slh.png + sli.png + slj.png + slk.png + sll.png example_func2highres1.png ; slicer ${HOME}/${JobName}_T1/${JobName}_sienax/I_brain example_func2highres -s 2 -x 0.35 sla.png -x 0.45 slb.png -x 0.55 slc.png -x 0.65 sld.png -y 0.35 sle.png -y 0.45 slf.png -y 0.55 slg.png -y 0.65 slh.png -z 0.35 sli.png -z 0.45 slj.png -z 0.55 slk.png -z 0.65 sll.png ; pngappend sla.png + slb.png + slc.png + sld.png + sle.png + slf.png + slg.png + slh.png + sli.png + slj.png + slk.png + sll.png example_func2highres2.png ; pngappend example_func2highres1.png - example_func2highres2.png example_func2highres.png;
+
+rm -f sl?.png example_func2highres2.png example_func2highres1.png
+
+
+# Warpen doen we niet
+#convert_xfm -omat example_func2standard.mat -concat highres2standard.mat example_func2highres.mat
+
+#convertwarp --ref=standard --premat=example_func2highres.mat --warp1=highres2standard_warp --out=example_func2standard_warp
+
+#applywarp --ref=standard --in=${HOME}/${JobName}_rs/example_func --out=example_func2standard --warp=example_func2standard_warp
+
+#convert_xfm -inverse -omat standard2example_func.mat example_func2standard.mat
+
+#slicer example_func2standard standard -s 2 -x 0.35 sla.png -x 0.45 slb.png -x 0.55 slc.png -x 0.65 sld.png -y 0.35 sle.png -y 0.45 slf.png -y 0.55 slg.png -y 0.65 slh.png -z 0.35 sli.png -z 0.45 slj.png -z 0.55 slk.png -z 0.65 sll.png ; pngappend sla.png + slb.png + slc.png + sld.png + sle.png + slf.png + slg.png + slh.png + sli.png + slj.png + slk.png + sll.png example_func2standard1.png ; slicer standard example_func2standard -s 2 -x 0.35 sla.png -x 0.45 slb.png -x 0.55 slc.png -x 0.65 sld.png -y 0.35 sle.png -y 0.45 slf.png -y 0.55 slg.png -y 0.65 slh.png -z 0.35 sli.png -z 0.45 slj.png -z 0.55 slk.png -z 0.65 sll.png ; pngappend sla.png + slb.png + slc.png + sld.png + sle.png + slf.png + slg.png + slh.png + sli.png + slj.png + slk.png + sll.png example_func2standard2.png ; pngappend example_func2standard1.png - example_func2standard2.png example_func2standard.png; 
+#rm -f sl?.png example_func2standard2.png
+
+
+
+###################################
+# PREPROCESSING STAGE 2
+###################################
+
+cd ${HOME}/${JobName}_rs/
+
+### MOTION CORRECTION ###
+#        Mcflirt        #
+#########################
+
+# run MCFLIRT motion correction on the prefiltered_functional_data
+echo "running MCFLIRT"
+mcflirt -in ${HOME}/${JobName}_rs/prefiltered_func_data -out ${HOME}/${JobName}_rs/prefiltered_func_data_mcf -mats -plots -reffile example_func -rmsrel -rmsabs -spline_final
+
+# make a folder mc and move files
+mkdir -p mc 
+mv -f prefiltered_func_data_mcf.mat prefiltered_func_data_mcf.par prefiltered_func_data_mcf_abs.rms prefiltered_func_data_mcf_abs_mean.rms prefiltered_func_data_mcf_rel.rms prefiltered_func_data_mcf_rel_mean.rms mc
+
+cd mc
+
+# Plot the Mcflirt rotational data
+fsl_tsplot -i prefiltered_func_data_mcf.par -t 'MCFLIRT estimated rotations (radians)' -u 1 --start=1 --finish=3 -a x,y,z -w 640 -h 144 -o rot.png 
+
+# Plot the Mcflirt translational data
+fsl_tsplot -i prefiltered_func_data_mcf.par -t 'MCFLIRT estimated translations (mm)' -u 1 --start=4 --finish=6 -a x,y,z -w 640 -h 144 -o trans.png 
+
+# Plot the Mcflirt mean displacement data
+fsl_tsplot -i prefiltered_func_data_mcf_abs.rms,prefiltered_func_data_mcf_rel.rms -t 'MCFLIRT estimated mean displacement (mm)' -u 1 -w 640 -h 144 -a absolute,relative -o disp.png 
+
+
+# rename motionparameter figures
+mv disp.png ${JobName}_disp.png
+mv rot.png ${JobName}_rot.png
+mv trans.png ${JobName}_trans.png
+
+
+cd ${HOME}/${JobName}_rs/
+
+
+#############################################
+
+# create mean mask to brain extract filtered functional scan
+
+fslmaths ${HOME}/${JobName}_rs/prefiltered_func_data_mcf -Tmean ${HOME}/${JobName}_rs/mean_func
+
+# Perform bet2 on the mean_func data, use a threshold of .3 
+bet2 ${HOME}/${JobName}_rs/mean_func ${HOME}/${JobName}_rs/mask -f 0.3 -n -m
+
+# This command moves the first input (mask_mask) to the new image (mask)
+immv ${HOME}/${JobName}_rs/mask_mask ${HOME}/${JobName}_rs/mask
+
+
+# Mask the motion and WM/CSF corrected functional data with the mask to create the masked (bet) motion corrected functional data
+fslmaths ${HOME}/${JobName}_rs/prefiltered_func_data_mcf -mas ${HOME}/${JobName}_rs/mask ${HOME}/${JobName}_rs/prefiltered_func_data_mcf_bet
+
+
+######################################
+## grand mean scaling + smoothing    #
+######################################
+
+#echo grandmeanscaling (intensity normalisation)
+fslmaths ${HOME}/${JobName}_rs/prefiltered_func_data_mcf_bet -ing 10000 ${HOME}/${JobName}_rs/func_gm.nii.gz -odt float
+
+# get_quickmask 
+fslmaths ${HOME}/${JobName}_rs/func_gm.nii.gz -abs -Tmin -bin ${HOME}/${JobName}_rs/func_gm_mask.nii.gz
+
+# Do Spatial Smoothing with FWHM = 5
+ssize=$(echo "scale=11; ((${SKERN}/2.355))" | bc) 
+fslmaths ${HOME}/${JobName}_rs/func_gm.nii.gz -kernel gauss ${ssize} -fmean -mas ${HOME}/${JobName}_rs/func_gm_mask.nii.gz ${HOME}/${JobName}_rs/func_sm.nii.gz
+
+
+#################################################
+## register filtered func 2 MNI + make minmask ##
+#################################################
+cd ${HOME}/${JobName}_rs/
+
+fslmaths func_sm.nii.gz -Tmin -thrP 25 -bin func_sm_minmask
+
+#############################
+## ICA AROMA                #
+#############################
+
+/home/common/applications/Python/Python-2.7.8/python ${WRAPPER_COMMON_DIR}/python/ICA_AROMA.py -in ${HOME}/${JobName}_rs/func_sm.nii.gz -out ${HOME}/${JobName}_rs/func.ica_aroma -mc ${HOME}/${JobName}_rs/mc/prefiltered_func_data_mcf.par -affmat ${HOME}/${JobName}_rs/fmri.ica/reg/example_func2highres.mat -m ${HOME}/${JobName}_rs/mask.nii.gz -tr ${TR}
+
+
+###################################################
+# WM + CSF regression - using GLM function of FSL #
+###################################################
+
+cd ${HOME}/${JobName}_rs/func.ica_aroma
+
+##################################################
+# create WM-mask, first remove FIRST, than erode #
+##################################################
+
+# Create WM_mask
+fslmaths ${HOME}/${JobName}_T1/${JobName}_sienax/I_stdmaskbrain_seg_2 -bin ${HOME}/${JobName}_rs/WM_mask_bin.nii.gz
+
+# Invert and binarize FIRST mask
+fslmaths ${HOME}/${JobName}_T1/${JobName}_sienax/FIRST_native -binv ${HOME}/${JobName}_rs/FIRST_native_bin_inv.nii.gz
+
+# remove FIRST from WM_mask
+fslmaths ${HOME}/${JobName}_rs/WM_mask_bin.nii.gz -mul ${HOME}/${JobName}_rs/FIRST_native_bin_inv.nii.gz ${HOME}/${JobName}_rs/WM_mask_bin_FIRST_rm.nii.gz
+
+# erode WM-mask
+fslmaths ${HOME}/${JobName}_rs/WM_mask_bin_FIRST_rm.nii.gz -ero ${HOME}/${JobName}_rs/WM_mask_final.nii.gz
+
+
+###########################################################
+# create CSF-mask, first mask with ventricles, than erode #
+###########################################################
+
+# Create CSF_mask
+fslmaths ${HOME}/${JobName}_T1/${JobName}_sienax/I_stdmaskbrain_seg_0.nii.gz -bin ${HOME}/${JobName}_rs/CSF_mask_bin.nii.gz
+
+
+# register standard-ventricle mask to 3dt1 space
+flirt -ref ${HOME}/${JobName}_T1/${JobName}_sienax/I_brain -in ${FSLDIR}/data/standard/MNI152_T1_2mm_VentricleMask.nii.gz -out ${HOME}/${JobName}_rs/VentricleMask_native.nii.gz -applyxfm -init ${HOME}/${JobName}_T1/${JobName}_sienax/standard2highres.mat -interp nearestneighbour 
+
+# multiply CSF mask with ventricle mask
+fslmaths ${HOME}/${JobName}_rs/CSF_mask_bin.nii.gz -mul ${HOME}/${JobName}_rs/VentricleMask_native.nii.gz ${HOME}/${JobName}_rs/CSF_mask_ventricles.nii.gz
+
+# erode CSF mask
+fslmaths ${HOME}/${JobName}_rs/CSF_mask_ventricles.nii.gz -ero ${HOME}/${JobName}_rs/CSF_mask_final.nii.gz
+
+# register to func space
+flirt -ref ${HOME}/${JobName}_rs/example_func -in ${HOME}/${JobName}_rs/WM_mask_final.nii.gz -out ${HOME}/${JobName}_rs/WM_mask_final_func.nii.gz -applyxfm -init ${HOME}/${JobName}_rs/fmri.ica/reg/highres2example_func.mat -interp nearestneighbour
+
+flirt -ref ${HOME}/${JobName}_rs/example_func -in ${HOME}/${JobName}_rs/CSF_mask_final.nii.gz -out ${HOME}/${JobName}_rs/CSF_mask_final_func.nii.gz -applyxfm -init ${HOME}/${JobName}_rs/fmri.ica/reg/highres2example_func.mat -interp nearestneighbour
+
+###################################
+# obtain regressors of WM and CSF #
+###################################
+
+mkdir nuisance
+
+# Obtain WM regressor
+fslmeants -i ${HOME}/${JobName}_rs/func.ica_aroma/denoised_func_data_nonaggr.nii.gz -m ${HOME}/${JobName}_rs/WM_mask_final_func.nii.gz -o ${HOME}/${JobName}_rs/func.ica_aroma/nuisance/WM_in_func_timeseries
+
+# Obtain CSF regressor
+fslmeants -i ${HOME}/${JobName}_rs/func.ica_aroma/denoised_func_data_nonaggr.nii.gz -m ${HOME}/${JobName}_rs/CSF_mask_final_func.nii.gz -o ${HOME}/${JobName}_rs/func.ica_aroma/nuisance/CSF_in_func_timeseries
+
+# combine WM and CSF regressor
+paste ${HOME}/${JobName}_rs/func.ica_aroma/nuisance/WM_in_func_timeseries ${HOME}/${JobName}_rs/func.ica_aroma/nuisance/CSF_in_func_timeseries > ${HOME}/${JobName}_rs/func.ica_aroma/nuisance/nuisance_timeseries
+
+# create tempMean
+fslmaths ${HOME}/${JobName}_rs/func.ica_aroma/denoised_func_data_nonaggr.nii.gz -Tmean ${HOME}/${JobName}_rs/func.ica_aroma/denoised_func_data_nonaggr_tempMean.nii.gz
+
+# Regress WM and CSF from your main signal
+fsl_glm -i ${HOME}/${JobName}_rs/func.ica_aroma/denoised_func_data_nonaggr.nii.gz -d ${HOME}/${JobName}_rs/func.ica_aroma/nuisance/nuisance_timeseries --demean --out_res=${HOME}/${JobName}_rs/func.ica_aroma/denoised_func_data_nonaggr_residual.nii.gz
+
+
+############################
+### BAND PASS FILTERING ####
+############################
+
+# high pass only
+
+# bptf = high-pass filter / TR / 2
+BPTF=`echo ${HPF} / ${TR} / 2 | bc -l`
+
+fslmaths ${HOME}/${JobName}_rs/func.ica_aroma/denoised_func_data_nonaggr_residual.nii.gz -bptf ${BPTF} -1 -add ${HOME}/${JobName}_rs/func.ica_aroma/denoised_func_data_nonaggr_tempMean.nii.gz ${HOME}/${JobName}_rs/denoised_func_data_nonaggr_wmcsf_hptf.nii.gz
+
+fslmaths ${HOME}/${JobName}_rs/denoised_func_data_nonaggr_wmcsf_hptf.nii.gz ${HOME}/${JobName}_rs/filtered_func_data
+
+fslmaths ${HOME}/${JobName}_rs/filtered_func_data -Tmean ${HOME}/${JobName}_rs/mean_func
+
+rm -rf ${HOME}/${JobName}_rs/prefiltered_func_data*
+
+
+############################################
+## minmask ##
+############################################
+
+cd ${HOME}/${JobName}_rs/
+
+## addition script Anand
+
+fslmaths ${HOME}/${JobName}_rs/filtered_func_data -Tmin -thrP 25 -bin ${HOME}/${JobName}_rs/filtered_func_data_minmask
+
+
+#################################
+#### ATLAS TO NATIVE FMRI SPACE #
+#################################
+
+# mask GM only for extraction of time series
+
+fslmaths ${HOME}/${JobName}_T1/${JobName}_sienax/I_stdmaskbrain_pve_1.nii.gz -bin ${HOME}/${JobName}_rs/gm_mask.nii.gz
+
+fslmaths ${HOME}/${JobName}_T1/${JobName}_sienax/BNA_FIRST_native.nii.gz -mul ${HOME}/${JobName}_rs/gm_mask.nii.gz ${HOME}/${JobName}_rs/BNA_FIRST_native_gm.nii.gz
+
+fslmaths ${HOME}/${JobName}_T1/${JobName}_sienax/AAL_FIRST_native.nii.gz -mul ${HOME}/${JobName}_rs/gm_mask.nii.gz ${HOME}/${JobName}_rs/AAL_FIRST_native_gm.nii.gz
+
+# FIRST + BNA to func space
+flirt -in ${HOME}/${JobName}_rs/BNA_FIRST_native_gm.nii.gz -ref ${HOME}/${JobName}_rs/example_func -applyxfm -init ${HOME}/${JobName}_rs/fmri.ica/reg/highres2example_func.mat -out ${HOME}/${JobName}_rs/fmri_BNA_FIRST_gm_atlas -interp nearestneighbour
+
+# multiply filtered func BNA FIRST gm mask with minmask (NOT TESTED IN GLIOMA)
+fslmaths ${HOME}/${JobName}_rs/fmri_BNA_FIRST_gm_atlas -mul ${HOME}/${JobName}_rs/filtered_func_data_minmask ${HOME}/${JobName}_rs/fmri_BNA_FIRST_gm_atlas_minmask
+
+# FIRST+ AAL to func space
+flirt -in ${HOME}/${JobName}_rs/AAL_FIRST_native_gm.nii.gz -ref ${HOME}/${JobName}_rs/example_func -applyxfm -init ${HOME}/${JobName}_rs/fmri.ica/reg/highres2example_func.mat -out ${HOME}/${JobName}_rs/fmri_AAL_FIRST_gm_atlas -interp nearestneighbour
+
+# multiply filtered func AAL FIRST gm mask with minmask (NOT TESTED IN GLIOMA)
+fslmaths ${HOME}/${JobName}_rs/fmri_AAL_FIRST_gm_atlas -mul ${HOME}/${JobName}_rs/filtered_func_data_minmask ${HOME}/${JobName}_rs/fmri_AAL_FIRST_gm_atlas_minmask
+
+#############################################################
+## extract timeseries from the filtered_func data BNA ATLAS #
+#############################################################
+
+mkdir ${HOME}/${JobName}_rs/timeseries/
+mkdir ${HOME}/${JobName}_rs/rois/
+
+cd ${HOME}/${JobName}_rs/
+
+# make sequence variable of BNA nodes + cerebellum (999)
+seq 224 > nodes.txt
+echo "999" >> nodes.txt
+
+for r in `cat ${HOME}/${JobName}_rs/nodes.txt`; do
+
+if test $r -lt 10
+then
+rr=00${r}
+elif test $r -lt 100
+then
+rr=0${r}
+else
+rr=${r}
+fi
+
+
+fslmaths ${HOME}/${JobName}_rs/fmri_BNA_FIRST_gm_atlas_minmask -thr ${r} -uthr ${r} ${HOME}/${JobName}_rs/rois/BNA_gm_minmask_${rr}
+fslmaths ${HOME}/${JobName}_rs/fmri_BNA_FIRST_gm_atlas -thr ${r} -uthr ${r} ${HOME}/${JobName}_rs/rois/BNA_gm_${rr}
+
+sleep 0.5 # because it sometimes crashes
+
+## extract roi vols for possible normalization
+fslstats ${HOME}/${JobName}_rs/rois/BNA_gm_${rr} -V >> ${HOME}/${JobName}_rs/rois/roivols.txt
+fslstats ${HOME}/${JobName}_rs/rois/BNA_gm_minmask_${rr} -V >> ${HOME}/${JobName}_rs/rois/roivols_minmask.txt
+
+###########################################################
+
+sleep 0.2 # because it sometimes crashes
+
+## extract actual time series 
+fslmeants -i ${HOME}/${JobName}_rs/filtered_func_data -m ${HOME}/${JobName}_rs/rois/BNA_gm_minmask_${rr} > ${HOME}/${JobName}_rs/timeseries/BNA_timeserie_${rr}.txt
+
+sleep 0.2 # because it sometimes crashes
+
+done
+
+## extract timeseries from the filtered_func data AAL ATLAS ------------------------
+
+mkdir ${HOME}/${JobName}_rs/timeseries_AAL/
+mkdir ${HOME}/${JobName}_rs/rois_AAL/
+
+cd ${HOME}/${JobName}_rs/
+
+for r in {1..92}; do
+
+if test $r -lt 10
+then
+rr=00${r}
+elif test $r -lt 100
+then
+rr=0${r}
+else
+rr=${r}
+fi
+
+fslmaths ${HOME}/${JobName}_rs/fmri_AAL_FIRST_gm_atlas_minmask -thr ${r} -uthr ${r} ${HOME}/${JobName}_rs/rois_AAL/AAL_gm_minmask_${rr}
+fslmaths ${HOME}/${JobName}_rs/fmri_AAL_FIRST_gm_atlas -thr ${r} -uthr ${r} ${HOME}/${JobName}_rs/rois_AAL/AAL_gm_${rr}
+
+sleep 0.5 # because it sometimes crashes
+
+## extract roi vols for possible normalization
+fslstats ${HOME}/${JobName}_rs/rois_AAL/AAL_gm_${rr} -V >> ${HOME}/${JobName}_rs/rois_AAL/roivols_AAL.txt
+fslstats ${HOME}/${JobName}_rs/rois_AAL/AAL_gm_minmask_${rr} -V >> ${HOME}/${JobName}_rs/rois_AAL/roivols_AAL_minmask.txt
+
+###########################################################
+
+sleep 0.2 # because it sometimes crashes
+
+## extract actual time series 
+fslmeants -i ${HOME}/${JobName}_rs/filtered_func_data -m ${HOME}/${JobName}_rs/rois_AAL/AAL_gm_minmask_${rr} > ${HOME}/${JobName}_rs/timeseries_AAL/AAL_timeserie_${rr}.txt
+
+sleep 0.2 # because it sometimes crashes
+
+done
+
+
+## export to file
+
+paste ${HOME}/${JobName}_rs/timeseries/BNA_timeserie_* > ${HOME}/${JobName}_rs/timeseries/BNA_timeseries.txt
+paste ${HOME}/${JobName}_rs/timeseries_AAL/AAL_timeserie_* > ${HOME}/${JobName}_rs/timeseries_AAL/AAL_timeseries.txt
+
+# turned off for de-bugging
+
+rm ${HOME}/${JobName}_rs/timeseries/BNA_timeserie_*
+rm ${HOME}/${JobName}_rs/timeseries_AAL/AAL_timeserie_*
+
+chmod -R g+rw ${HOME}/${JobName}_rs/
+
+# Archive the results
+cd ${HOME}
+
+cp ${HOME}/${JobName}_rs/rois/roivols.txt ./Output/${JobName}_BNA_roivols.txt
+cp ${HOME}/${JobName}_rs/rois/roivols_minmask.txt ./Output/${JobName}_BNA_roivols_minmask.txt
+cp ${HOME}/${JobName}_rs/timeseries/BNA_timeseries.txt ./Output/${JobName}_BNA_timeseries.txt
+cp ${HOME}/${JobName}_rs/rois_AAL/roivols_AAL.txt ./Output/${JobName}_AAL_roivols.txt
+cp ${HOME}/${JobName}_rs/rois_AAL/roivols_AAL_minmask.txt ./Output/${JobName}_AAL_roivols_minmask.txt
+cp ${HOME}/${JobName}_rs/timeseries_AAL/AAL_timeseries.txt ./Output/${JobName}_AAL_timeseries.txt
+
+
+tar -jcf ./Output/${JobName}.ICA_AROMA.tar.bz2 ${JobName}_rs
+
+
+
+
+#cd ../..
+
+ls -R -ltr
+
+
+
+##############################################################################
+# Signal succesfull completion to ExpressLane                                #
+##############################################################################
+
+touch ${HOME}/Output/"${JobName}".4script-done
+
+chmod -R g+rw ${HOME}/Output/*
+
+

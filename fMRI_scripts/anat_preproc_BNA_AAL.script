@@ -1,0 +1,339 @@
+#!/bin/bash
+# $Id: FSL SINGLE SUBJECT MELODIC SCRIPT 2016/07/08 C.Vriend
+# using FSL5.0.8. and fsl_sub patch+v03.
+# edited and tailored 2017/11/08 by L. Douw
+
+##############################################################################
+#                                                                            #
+# Description  : FSL SIENAX                                                 #
+#                                                                            #
+# Usage        :  <jobname> <T1>                      #
+#                                                                            #
+#                                                                            #
+# Output       : All files generate in the output are compressed             #
+#                and copied to the output directory                          #
+#                                                                            #
+# Copyright 2012,2013 VU University medical Center                           #
+# Author: Ronald A van Schijndel & Keith S Cover & Chris Vriend              #
+#                                                                            #
+# -------------------------------------------------------------------------- #
+# Log:                                                                       #
+#                                                                            #
+# 2012-09-14  R.A. van Schihndel                                             #
+# First version (expresslane_freesurfer).                                    #
+#                                                                            E
+# 2013-04-21  K.S. Cover                                                     #
+# Extensive reformating to become official N4U ExpressLane script            #    
+#                                                                            #
+# 2013-05-22  K.S. Cover                                                     #
+# Upgraded to FSL 5.0.8.0 from 5.0.1.0                                       #    
+#                                                                            #   
+# 2013-07-02 K.S. Cover                                                      #
+# Modified to run at VUmc                                                    #
+#                                                                            #
+# 2013-07-23 K.S. Cover                                                      #
+# Mofified to run BedPostX                                                   #
+#                                                                            #
+# 2014-07-26 K.S. Cover                                                      #
+# Upgraded to FSL 5.0.8 from 5.0.8                                           #
+#                                                                            #
+##############################################################################
+
+
+##############################################################################
+# Assign the input parameters to logical names                               #
+# (normaly supplied by the jobs file)                                        #
+##############################################################################
+
+JobName=$1
+FileName1=$2
+
+echo JobName:   "${JobName}"
+echo FileName1:  "${FileName1}"
+
+# You can enter the -f value for the sienax preprocessing step as a third column of your .jobs file
+# If you don't specify this value, the default option will be used (-f 0.2)
+
+if [ -z "$3" ]; then
+f_value=0.4 # when there is no additional f-value in the .jobs file
+else
+f_value=$3  # when there is an additional f-value in the .jobs file
+fi
+
+
+# INPUT VARIABLES ############################################################
+
+
+##############################################################################
+# Standard stuff to start script                                             #
+##############################################################################
+
+set -xv
+umask 077
+export HOME=${PWD}
+mkdir Output
+touch Output/"${JobName}".4script-begn
+echo  ${WRAPPER_COMMON_DIR} 
+ls -ltra ${WRAPPER_COMMON_DIR}
+ls -ltra
+set
+
+
+##############################################################################
+# Check the number of parameters                                             #
+##############################################################################
+
+SCRIPT_NAME="${0##*/}"
+USAGE="Usage: $SCRIPT_NAME <JobName> <FileName>" 
+if [ $# -ne 2 ] ; then
+   echo "" >&2
+   echo "WARNING: 2 parameters expected. " $# " found." >&2
+   echo "" >&2
+   echo "$USAGE" >&2
+fi
+
+###############################################################################
+# source FSL 5.0.10                                                    #
+###############################################################################
+
+if [ -z ${FSLDIR+x} ]; then 
+
+echo "FSLDIR is being sourced"; 
+
+export FSLDIR=/home/common/applications/FSL/FSL-5.0.10/
+. $FSLDIR/etc/fslconf/fsl.sh
+export PATH=$PATH:$FSLDIR/bin
+export FSLOUTPUTTYPE=NIFTI_GZ
+ls -ltra ${WRAPPER_COMMON_DIR}
+df .
+
+
+#cp VUmc+FSL+5.0.8+fsl_sub+v03 fsl/bin/fsl_sub
+
+else 
+
+echo "FSLDIR is already sourced: $FSLDIR"
+sleep $[ #RANDOM % 30 ]
+
+fi
+
+
+verbose=1
+#######################################################
+cd ${HOME}
+
+
+   
+# unset environmental variable SGE_ROOT
+unset SGE_ROOT
+echo set beg
+set
+echo set end
+
+
+##############################################################################
+# Process the data, compress the output and move it to the Output directory  # 
+##############################################################################
+
+mkdir ${JobName}_T1
+mv ${FileName1} ${JobName}_T1
+
+cd ${JobName}_T1
+
+# CLIPNECK
+
+T1orig=$(echo ${FileName1##*/}|sed -e 's/.gz//' -e 's/.nii//')
+standard_space_roi ${FileName1} ${T1orig}_noneck.nii.gz -maskFOV -roiNONE
+
+
+## SIENAX
+
+cd ${HOME}/${JobName}_T1
+echo "running SIENAX"
+sienax ${T1orig}_noneck.nii.gz -d -B "-S -B -R -f $f_value" -o ${JobName}_sienax
+#sienax ${FileName1} -d -B "-B -R -f 0.4" -o ${JobName}_sienax
+
+
+## FIRST
+
+cd ${HOME}/${JobName}_T1/${JobName}_sienax
+# FIRST
+mkdir -p first 
+cd first
+echo "running FIRST" 
+run_first_all -b -i ../I_brain.nii.gz -s L_Accu,L_Amyg,L_Caud,L_Hipp,L_Pall,L_Puta,L_Thal,R_Accu,R_Amyg,R_Caud,R_Hipp,R_Pall,R_Puta,R_Thal -o ${JobName}_first
+# specified the regions that have to be segmented in FIRST because the brainstem is not necessary and in some instannces leads to failure of FIRST (due to neck clipping?)
+
+
+## co-reg with MNI space 
+
+#fslmaths ${HOME}/${JobName}_T1/${JobName}_sienax/I_brain highres
+#fslmaths ${HOME}/${JobName}_T1/${JobName}_sienax/I highres_head
+#fslmaths ${FSLDIR}/data/standard/MNI152_T1_2mm_brain standard
+#fslmaths ${FSLDIR}/data/standard/MNI152_T1_2mm standard_head
+#fslmaths ${FSLDIR}/data/standard/MNI152_T1_2mm_brain_mask_dil standard_mask
+
+
+cd ${HOME}/${JobName}_T1/${JobName}_sienax
+
+echo "running FLIRT of high resolution T1"
+
+flirt -in I_brain -ref ${FSLDIR}/data/standard/MNI152_T1_1mm_brain -out highres2standard -omat highres2standard.mat -interp nearestneighbour 
+
+# -cost corratio -dof 12 -searchrx -90 90 -searchry -90 90 -searchrz -90 90
+
+# we decided to stop using FNIRT because of the tumor warping mess
+#echo "running FNIRT"
+#fnirt --iout=highres2standard_head --in=highres_head --aff=highres2standard.mat --cout=highres2standard_warp --iout=highres2standard --jout=highres2highres_jac --config=T1_2_MNI152_1mm --ref=standard_head --refmask=standard_mask --warpres=10,10,10
+#applywarp -i highres -r standard -o highres2standard -w highres2standard_warp
+
+convert_xfm -inverse -omat standard2highres.mat highres2standard.mat
+
+## atlasses
+
+# w/ BNA-atlas with cerebellum
+BNAfile=${WRAPPER_COMMON_DIR}/BNA_cortical_cerebellum_atlas_MNI_1mm.nii.gz
+
+# AAL atlas
+AALfile=${WRAPPER_COMMON_DIR}/aal_MNI_V4_1mm_gong_brain.nii.gz
+
+flirt -ref I_brain -in ${BNAfile} -applyxfm -init standard2highres.mat -out BNA_native -interp nearestneighbour
+
+flirt -ref I_brain -in ${AALfile} -applyxfm -init standard2highres.mat -out AAL_native -interp nearestneighbour
+
+slicer highres2standard standard -s 2 -x 0.35 sla.png -x 0.45 slb.png -x 0.55 slc.png -x 0.65 sld.png -y 0.35 sle.png -y 0.45 slf.png -y 0.55 slg.png -y 0.65 slh.png -z 0.35 sli.png -z 0.45 slj.png -z 0.55 slk.png -z 0.65 sll.png ; pngappend sla.png + slb.png + slc.png + sld.png + sle.png + slf.png + slg.png + slh.png + sli.png + slj.png + slk.png + sll.png highres2standard1.png ; slicer standard highres2standard -s 2 -x 0.35 sla.png -x 0.45 slb.png -x 0.55 slc.png -x 0.65 sld.png -y 0.35 sle.png -y 0.45 slf.png -y 0.55 slg.png -y 0.65 slh.png -z 0.35 sli.png -z 0.45 slj.png -z 0.55 slk.png -z 0.65 sll.png ; pngappend sla.png + slb.png + slc.png + sld.png + sle.png + slf.png + slg.png + slh.png + sli.png + slj.png + slk.png + sll.png highres2standard2.png ; pngappend highres2standard1.png - highres2standard2.png highres2standard.png; /bin/rm -f sl?.png highres2standard2.png
+
+/bin/rm highres2standard1.png
+
+###################################
+#### ADD FIRST ROIS 2 BNA Atlas ###
+###################################
+
+# extract subcortical regions from FIRST + rename + Erode
+
+cd ${HOME}/${JobName}_T1/${JobName}_sienax/first
+
+i=211 # BNA_cortical atlas contains 210 regions. next number is 211
+j=79  # AAL_cortical atlas contains 78 regions, next number is 79	
+
+
+# determine name of FIRST segmentation file
+firstsegfile=$(ls -1 *firstseg*)
+
+for r in 10 11 12 13 17 18 26 49 50 51 52 53 54 58; do
+
+fslmaths ${firstsegfile} -thr ${r} -uthr ${r} -bin ${JobName}_temp_${i}
+fslmaths ${JobName}_temp_${i} -mul ${i} ${JobName}_${i}
+fslmaths ${JobName}_temp_${i} -mul ${j} ${JobName}_${j}
+
+
+# clean up
+rm ${JobName}_temp_${i}.nii.gz 
+
+i=$[${i}+1]
+j=$[${j}+1]
+done
+
+# BNA-atlas
+fslmaths ${JobName}_211.nii.gz -mul 0 temp.nii.gz
+for r in {211..224}; do
+fslmaths temp.nii.gz -add ${JobName}_${r}.nii.gz temp.nii.gz
+done
+mv temp.nii.gz ${HOME}/${JobName}_T1/${JobName}_sienax/FIRST_native.nii.gz
+
+# AAL-atlas
+fslmaths ${JobName}_79.nii.gz -mul 0 temp.nii.gz
+for r in {79..92}; do
+fslmaths temp.nii.gz -add ${JobName}_${r}.nii.gz temp.nii.gz
+done
+mv temp.nii.gz ${HOME}/${JobName}_T1/${JobName}_sienax/FIRST_native_aal.nii.gz
+
+
+# clean up
+
+#tar -jcvf vtk.tar.bz2 *.vtk
+#tar -jcvf bvars.tar.bz2 *.bvars
+
+#if [ -f vtk.tar.bz2  ]
+#then
+rm *.vtk
+#fi
+
+#if [ -f bvars.tar.bz2  ]
+#then
+rm *.bvars
+#fi
+
+cd ${HOME}/${JobName}_T1/${JobName}_sienax
+
+# FIRST + BNA combined
+fslmaths BNA_native -add FIRST_native.nii.gz BNA_FIRST_native.nii.gz
+
+# FIRST + AAL combined
+fslmaths AAL_native -add FIRST_native_aal.nii.gz AAL_FIRST_native.nii.gz
+
+
+# make sequence variable of BNA nodes + cerebellum (999)
+seq 224 > nodes.txt
+echo "999" >> nodes.txt
+
+mkdir ${HOME}/${JobName}_T1/${JobName}_sienax/rois/
+
+for r in `cat ${HOME}/${JobName}_T1/${JobName}_sienax/nodes.txt`; do
+
+if test $r -lt 10
+then
+rr=00${r}
+elif test $r -lt 100
+then
+rr=0${r}
+else
+rr=${r}
+fi
+
+fslmaths BNA_FIRST_native.nii.gz -thr ${r} -uthr ${r} ${HOME}/${JobName}_T1/${JobName}_sienax/rois/region_${rr}
+
+sleep 0.2 # because it sometimes crashes
+
+## extract roi vols for possible normalization
+fslstats ${HOME}/${JobName}_T1/${JobName}_sienax/rois/region_${rr} -V >> ${HOME}/${JobName}_T1/${JobName}_sienax/rois/roivols.txt
+done
+
+# Repeat for AAL atlas
+seq 92 > nodes_AAL.txt
+mkdir ${HOME}/${JobName}_T1/${JobName}_sienax/rois_AAL/
+
+for r in `cat ${HOME}/${JobName}_T1/${JobName}_sienax/nodes_AAL.txt`; do
+fslmaths AAL_FIRST_native.nii.gz -thr ${r} -uthr ${r} ${HOME}/${JobName}_T1/${JobName}_sienax/rois_AAL/region_${r}
+
+sleep 0.2 # because it sometimes crashes
+
+# extract roi vols for possible normalization
+fslstats ${HOME}/${JobName}_T1/${JobName}_sienax/rois_AAL/region_${r} -V >> ${HOME}/${JobName}_T1/${JobName}_sienax/rois_AAL/roisAALvols.txt
+
+done
+
+
+
+# Archive the results
+#cd ${HOME}
+cd ${HOME}/${JobName}_T1
+
+chmod -R g+rw ${JobName}_sienax
+
+tar -jcf ${HOME}/Output/${JobName}.sienax.tar.bz2 ${JobName}_sienax 
+mv ${T1orig}_noneck.nii.gz ${HOME}/Output/
+#cd ../..
+
+ls -R -ltr
+
+chmod -R g+rw ${HOME}/Output
+
+##############################################################################
+# Signal succesfull completion to ExpressLane                                #
+##############################################################################
+
+touch ${HOME}/Output/"${JobName}".4script-done
+
+
+
